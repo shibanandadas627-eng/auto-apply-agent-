@@ -30,6 +30,7 @@ ss.setdefault("profile_saved", False)
 ss.setdefault("jobs", {})
 ss.setdefault("delay", 3)
 ss.setdefault("tz", "UTC")
+ss.setdefault("extra_keys", {"adzuna_id": "", "adzuna_key": "", "rapidapi_key": ""})
 
 
 def flash(kind, msg):
@@ -76,7 +77,7 @@ def listings(kind, name=""):
 
 def run_search(progress, note):
     p = ss.profile
-    tasks = [(s, "") for s in p["sources"]]
+    tasks = [(s, "") for s in p["sources"] if s in ("remotive", "arbeitnow", "remoteok")]
     tasks += [("greenhouse", b) for b in csv(p["greenhouse"]) if SAFE_NAME.match(b)]
     tasks += [("lever", b) for b in csv(p["lever"]) if SAFE_NAME.match(b)]
     pool, errors = [], []
@@ -86,6 +87,10 @@ def run_search(progress, note):
             pool += listings(kind, name)
         except Exception as e:  # a source can be down; keep going
             errors.append(f"{kind} {name}: {str(e)[:120]}")
+    note.write("Searching Google, LinkedIn, Naukri, Internshala and other sites through search...")
+    extra, extra_err = jobs.fetch_extra(p, ss.settings, ss.extra_keys)
+    pool += extra
+    errors += extra_err
     added, seen = 0, set()
     for j in pool:
         if j["id"] in seen or not j["url"] or j["id"] in ss.jobs:
@@ -119,7 +124,7 @@ def prepare(j):
 
 # ---------------------------------------------------------------- remember on this device
 # Saved in THIS browser's own storage (localStorage). It never goes to our server.
-DEVICE_KEYS = ["aa_provider", "aa_key", "aa_model", "aa_state"]
+DEVICE_KEYS = ["aa_provider", "aa_key", "aa_model", "aa_state", "aa_adzuna_id", "aa_adzuna_key", "aa_rapid"]
 ss.setdefault("remember", True)
 ss.setdefault("device_loaded", False)
 ss.setdefault("saved_hash", "")
@@ -138,6 +143,8 @@ if stored is not None and not ss.device_loaded:
             ss.profile_saved = bool(_prof["name"].strip() and _prof["roles"].strip())
         except Exception:
             pass
+    ss.extra_keys = {"adzuna_id": items.get("aa_adzuna_id") or "", "adzuna_key": items.get("aa_adzuna_key") or "",
+                     "rapidapi_key": items.get("aa_rapid") or ""}
     if items.get("aa_key"):
         _prov = items.get("aa_provider") if items.get("aa_provider") in ("gemini", "groq") else "gemini"
         _model = items.get("aa_model") or ""
@@ -162,6 +169,7 @@ def forget_device():
     ss.settings = {"provider": "gemini", "api_key": "", "model": "", "base_url": ""}
     ss.cv_text, ss.cv_sig, ss.jobs = "", None, {}
     ss.profile, ss.profile_saved = dict(DEFAULT_PROFILE), False
+    ss.extra_keys = {"adzuna_id": "", "adzuna_key": "", "rapidapi_key": ""}
     for k in [k for k in ss if k.startswith("cl_")]:
         del ss[k]
 
@@ -206,8 +214,9 @@ if "_flash" in ss:
     kind, msg = ss.pop("_flash")
     getattr(st, kind)(msg)
 
-t_setup, t_find, t_review, t_track, t_report, t_ask = st.tabs(
-    ["1 · Setup", "2 · Find jobs", "3 · Review", "4 · Tracker", "5 · Today's report", "6 · Ask AI"])
+t_setup, t_find, t_review, t_track, t_report, t_ask, t_auto = st.tabs(
+    ["1 · Setup", "2 · Find jobs", "3 · Review", "4 · Tracker", "5 · Today's report", "6 · Ask AI",
+     "7 · Run daily by itself"])
 
 # ---------------------------------------------------------------- SETUP
 with t_setup:
@@ -267,7 +276,11 @@ with t_setup:
         d, e = st.columns(2)
         minscore = d.slider("Shortlist jobs scoring at least", 0, 100, int(p["min_score"]))
         perrun = e.slider("Jobs to score per search (free limits are small)", 5, 25, int(p["max_per_run"]))
-        srcs = st.multiselect("Job sources", ["remotive", "arbeitnow", "remoteok"], p["sources"])
+        srcs = st.multiselect(
+            "Job sources", jobs.ALL_SOURCES, [s for s in p["sources"] if s in jobs.ALL_SOURCES],
+            help="google_web searches Google for LinkedIn, Naukri, Internshala and other listings (needs a "
+                 "Gemini key). adzuna and jsearch need the optional free keys below.")
+        country = st.text_input("Adzuna country code (in, gb, us, au, ca, de, ...)", p.get("adzuna_country", "in"))
         g, h = st.columns(2)
         gh = g.text_input("Greenhouse company boards (optional)", p["greenhouse"],
                           help="From boards.greenhouse.io/NAME use NAME")
@@ -275,11 +288,22 @@ with t_setup:
         if st.form_submit_button("Save"):
             ss.profile = {**ss.profile, "name": name, "location": city, "roles": roles, "must_have": must, "avoid": avoid,
                           "locations": locs, "remote_ok": remote, "job_type": jt, "min_score": minscore,
-                          "max_per_run": perrun, "sources": srcs, "greenhouse": gh, "lever": lv}
+                          "max_per_run": perrun, "sources": srcs, "greenhouse": gh, "lever": lv,
+                          "adzuna_country": country.strip().lower()[:2] or "in"}
             ss.profile_saved = bool(name.strip() and roles.strip())
             flash("success" if ss.profile_saved else "warning",
                   "Saved." if ss.profile_saved else "Saved, but please fill in your name and at least one role.")
             st.rerun()
+
+    st.subheader("Optional · More job sources")
+    st.caption("Both are free. They let the agent search LinkedIn, Indeed, Glassdoor and Naukri-style listings "
+               "through proper APIs. Leave empty to skip.")
+    k1, k2, k3 = st.columns(3)
+    ek = ss.extra_keys
+    ek["adzuna_id"] = k1.text_input("Adzuna app id (developer.adzuna.com)", ek["adzuna_id"]).strip()
+    ek["adzuna_key"] = k2.text_input("Adzuna app key", ek["adzuna_key"], type="password").strip()
+    ek["rapidapi_key"] = k3.text_input("RapidAPI key for JSearch (rapidapi.com)", ek["rapidapi_key"],
+                                       type="password").strip()
 
 # ---------------------------------------------------------------- FIND
 with t_find:
@@ -456,6 +480,28 @@ with t_ask:
         except LLMError as e:
             st.error(friendly(e))
 
+# ---------------------------------------------------------------- AUTOMATION
+with t_auto:
+    st.write("This website only works while you have it open. To make the agent search **every day by itself**, "
+             "it runs on GitHub (free) and emails you the best matches with cover letters already written. "
+             "You still read each letter and press apply yourself.")
+    st.markdown("""**One-time setup (about 10 minutes)**
+1. Upload `auto_run.py`, `requirements-agent.txt` and the `.github` folder to your repository (they are in this update).
+2. In your repository open **Settings → Secrets and variables → Actions → New repository secret** and add the secrets below.
+3. Open the **Actions** tab, choose **Daily job search**, click **Run workflow** to test it. After that it runs every morning.""")
+    st.markdown("**Secrets to add**")
+    st.markdown("- `AI_PROVIDER`: `gemini` or `groq`\n- `AI_KEY`: your AI key\n"
+                "- `AA_PROFILE`: the text in the first box below\n- `AA_CV`: the text in the second box below\n"
+                "- `SMTP_USER`, `SMTP_PASS`: your Gmail address and a Gmail **app password** "
+                "(Google Account → Security → App passwords)\n- `EMAIL_TO`: where to send the digest\n"
+                "- Optional: `ADZUNA_ID`, `ADZUNA_KEY`, `RAPIDAPI_KEY`")
+    st.caption("Your repository is public, so use secrets for all of this. Never put these values in a file.")
+    st.markdown("**AA_PROFILE** (copy with the icon in the corner)")
+    st.code(json.dumps(ss.profile), language="json", wrap_lines=True)
+    st.markdown("**AA_CV**")
+    st.code(ss.cv_text[:30000] or "(upload your CV in Setup first)", language=None, wrap_lines=True)
+    st.warning("Don't share these boxes with anyone. They contain your details.")
+
 # ---------------------------------------------------------------- save to this device (keep at the very end)
 if ss.device_loaded:
     if ss.remember:
@@ -463,6 +509,9 @@ if ss.device_loaded:
         if ss.connected:
             _items.update(aa_provider=ss.settings["provider"], aa_key=ss.settings["api_key"],
                           aa_model=ss.settings["model"])
+        _ek = ss.extra_keys
+        if _ek["adzuna_id"] or _ek["adzuna_key"] or _ek["rapidapi_key"]:
+            _items.update(aa_adzuna_id=_ek["adzuna_id"], aa_adzuna_key=_ek["adzuna_key"], aa_rapid=_ek["rapidapi_key"])
         if ss.cv_text or ss.jobs or ss.profile_saved:
             _items["aa_state"] = logic.export_state(ss.profile, ss.cv_text, ss.jobs, compact=True)
         if _items:

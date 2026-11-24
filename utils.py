@@ -7,7 +7,8 @@ DEFAULT_PROFILE = {
     "locations": "", "remote_ok": True,
     "job_type": "any",            # any | internship | full-time
     "min_score": 60, "max_per_run": 15, "daily_goal": 5,
-    "sources": ["remotive", "arbeitnow", "remoteok"],
+    "sources": ["remotive", "arbeitnow", "remoteok", "google_web"],
+    "adzuna_country": "in",
     "greenhouse": "", "lever": "",
 }
 

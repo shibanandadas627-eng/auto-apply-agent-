@@ -5,6 +5,8 @@ and get a tailored cover letter for each one. Every visitor brings their own fre
 
 ## What it does
 - Finds jobs from Remotive, Arbeitnow, RemoteOK, and Greenhouse / Lever company boards
+- Reaches LinkedIn, Internshala, Naukri, Indeed and more through Google Search (Gemini key) and the optional free Adzuna and JSearch APIs. It never logs in to or scrapes those sites
+- Can run every day by itself on GitHub Actions and email you the best matches with draft letters (see the "7 · Run daily by itself" tab)
 - Scores each job 0-100 against the visitor's CV, with a reason
 - Writes a cover letter and CV highlights using only facts from the CV
 - Drafts answers to application questions
@@ -53,3 +55,9 @@ Double-click `run_local.bat` (needs Python 3.10+). Open the address it shows, us
 4. Click **Commit changes**. Streamlit redeploys by itself in about a minute.
 5. If the site still shows the old version: on your site click **Manage app** (bottom right), open the menu,
    and choose **Reboot app**. Then refresh the page with Ctrl + Shift + R.
+
+## Running it daily by itself
+Upload `auto_run.py`, `requirements-agent.txt` and the `.github` folder to the repository, then follow the
+"7 · Run daily by itself" tab in the app. Everything personal goes in repository **secrets**, never in files.
+GitHub pauses scheduled runs if the repository has no activity for 60 days; press **Run workflow** in the
+Actions tab to wake it. The `.github` folder starts with a dot, so on Windows make sure it is selected when you drag files in.

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import time
 
 import pandas as pd
@@ -10,6 +11,7 @@ import jobs
 import llm
 import logic
 import matcher
+import store
 import tailor
 from llm import LLMError
 from logic import STATUSES, SAFE_NAME, friendly, valid_url
@@ -27,6 +29,7 @@ ss.setdefault("profile", dict(DEFAULT_PROFILE))
 ss.setdefault("profile_saved", False)
 ss.setdefault("jobs", {})
 ss.setdefault("delay", 3)
+ss.setdefault("tz", "UTC")
 
 
 def flash(kind, msg):
@@ -99,7 +102,7 @@ def run_search(progress, note):
         except LLMError as e:
             errors.append(friendly(e))
             break
-        j["score"], j["reason"] = s["score"], s["reason"]
+        j["score"], j["reason"], j["scored_at"] = s["score"], s["reason"], logic.now_iso()
         j["status"] = "shortlisted" if s["score"] >= int(p["min_score"]) else "low"
         progress.progress(n / max(len(todo), 1), text=f"Scored {n} of {len(todo)}")
         time.sleep(ss.delay)
@@ -108,10 +111,59 @@ def run_search(progress, note):
 
 def prepare(j):
     out = tailor.prepare(j, ss.profile, ss.cv_text, ss.settings)
-    j["cover_letter"], j["highlights"] = out["cover_letter"], out["highlights"]
+    j["cover_letter"], j["highlights"], j["letter_at"] = out["cover_letter"], out["highlights"], logic.now_iso()
     if j["status"] in ("new", "low", "shortlisted"):
         j["status"] = "ready"
     ss[f"cl_{j['id']}"] = out["cover_letter"]
+
+
+# ---------------------------------------------------------------- remember on this device
+# Saved in THIS browser's own storage (localStorage). It never goes to our server.
+DEVICE_KEYS = ["aa_provider", "aa_key", "aa_model", "aa_state"]
+ss.setdefault("remember", True)
+ss.setdefault("device_loaded", False)
+ss.setdefault("saved_hash", "")
+
+with st.sidebar:
+    stored = store.local_store("get", "init", keys=DEVICE_KEYS)
+if stored is not None and stored.get("tz"):
+    ss.tz = str(stored["tz"])
+if stored is not None and not ss.device_loaded:
+    ss.device_loaded = True
+    items = stored.get("items") or {}
+    if items.get("aa_state"):
+        try:
+            _prof, _cvt, _jb = logic.import_state(items["aa_state"])
+            ss.profile, ss.cv_text, ss.jobs = _prof, _cvt, _jb
+            ss.profile_saved = bool(_prof["name"].strip() and _prof["roles"].strip())
+        except Exception:
+            pass
+    if items.get("aa_key"):
+        _prov = items.get("aa_provider") if items.get("aa_provider") in ("gemini", "groq") else "gemini"
+        _model = items.get("aa_model") or ""
+        _model = _model if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", _model) else ""
+        _s = {"provider": _prov, "api_key": items["aa_key"], "model": _model,
+              "base_url": llm.GROQ_BASE if _prov == "groq" else ""}
+        with st.spinner("Reconnecting your saved AI key..."):
+            try:
+                llm.ask(_s, "Reply with the single word OK.", retries=1)
+                ss.settings, ss.connected = _s, True
+            except LLMError:
+                try:   # the model may have been retired: pick a fresh one
+                    ss.settings, ss.connected = connect(_prov, items["aa_key"]), True
+                except LLMError as e:
+                    flash("warning", "Your saved key stopped working: " + friendly(e) +
+                          " Paste a new key in Setup.")
+
+
+def forget_device():
+    ss.remember = False
+    ss.connected = False
+    ss.settings = {"provider": "gemini", "api_key": "", "model": "", "base_url": ""}
+    ss.cv_text, ss.cv_sig, ss.jobs = "", None, {}
+    ss.profile, ss.profile_saved = dict(DEFAULT_PROFILE), False
+    for k in [k for k in ss if k.startswith("cl_")]:
+        del ss[k]
 
 
 # ---------------------------------------------------------------- sidebar
@@ -139,7 +191,9 @@ with st.sidebar:
             st.error("That doesn't look like a progress file from this app.")
     st.divider()
     st.markdown("### Privacy")
-    st.caption("Your key, CV and jobs stay in this browser session and disappear when you close the tab. "
+    st.button("🗑️ Forget my data on this device", on_click=forget_device)
+    st.caption("If 'Remember on this device' is ticked in Setup, your key, CV and jobs are saved in this "
+               "browser only (never on our server). Untick it or use the button above on a shared computer. "
                "To score jobs and write letters, your CV text and the job text are sent to the AI provider "
                "you choose, under that provider's terms (Google's free tier may use data to improve its "
                "products). Don't upload anything you aren't comfortable sharing with them.")
@@ -152,8 +206,8 @@ if "_flash" in ss:
     kind, msg = ss.pop("_flash")
     getattr(st, kind)(msg)
 
-t_setup, t_find, t_review, t_track, t_ask = st.tabs(
-    ["1 · Setup", "2 · Find jobs", "3 · Review", "4 · Tracker", "5 · Ask AI"])
+t_setup, t_find, t_review, t_track, t_report, t_ask = st.tabs(
+    ["1 · Setup", "2 · Find jobs", "3 · Review", "4 · Tracker", "5 · Today's report", "6 · Ask AI"])
 
 # ---------------------------------------------------------------- SETUP
 with t_setup:
@@ -163,6 +217,8 @@ with t_setup:
     st.info({"gemini": "Get a free key: open aistudio.google.com/apikey, sign in, click Create API key, copy it.",
              "groq": "Get a free key: open console.groq.com/keys, sign in, click Create API Key, copy it."}[prov])
     key = st.text_input("Paste your API key here", type="password")
+    st.checkbox("Remember on this device so I don't have to paste it again "
+                "(don't tick on a shared computer)", key="remember")
     if ss.connected:
         st.success(f"Connected (model: {ss.settings['model']}).")
     if st.button("Connect", type="primary"):
@@ -195,7 +251,7 @@ with t_setup:
 
     st.subheader("Step 3 · What do you want?")
     p = ss.profile
-    with st.form("profile"):
+    with st.form("profile_form"):
         a, b, c = st.columns(3)
         name = a.text_input("Your full name (signs your cover letters)", p["name"])
         city = b.text_input("Your city", p["location"])
@@ -217,7 +273,7 @@ with t_setup:
                           help="From boards.greenhouse.io/NAME use NAME")
         lv = h.text_input("Lever companies (optional)", p["lever"], help="From jobs.lever.co/NAME use NAME")
         if st.form_submit_button("Save"):
-            ss.profile = {"name": name, "location": city, "roles": roles, "must_have": must, "avoid": avoid,
+            ss.profile = {**ss.profile, "name": name, "location": city, "roles": roles, "must_have": must, "avoid": avoid,
                           "locations": locs, "remote_ok": remote, "job_type": jt, "min_score": minscore,
                           "max_per_run": perrun, "sources": srcs, "greenhouse": gh, "lever": lv}
             ss.profile_saved = bool(name.strip() and roles.strip())
@@ -313,10 +369,10 @@ with t_review:
                                    key=f"dl{j['id']}")
             c1, c2 = st.columns(2)
             if c1.button("✅ I applied", key=f"ok{j['id']}"):
-                j["status"] = "applied"
+                logic.set_status(j, "applied")
                 st.rerun()
             if c2.button("🚫 Skip", key=f"sk{j['id']}"):
-                j["status"] = "skipped"
+                logic.set_status(j, "skipped")
                 st.rerun()
 
 # ---------------------------------------------------------------- TRACKER
@@ -328,17 +384,61 @@ with t_track:
         st.write("  ".join(f"**{k}**: {v}" for k, v in counts.items()))
         df = pd.DataFrame(list(ss.jobs.values()))[["id", "title", "company", "score", "status", "notes", "url"]]
         edited = st.data_editor(
-            df, hide_index=True, use_container_width=True, disabled=["id", "title", "company", "score", "url"],
+            df, hide_index=True, disabled=["id", "title", "company", "score", "url"],
             column_config={"status": st.column_config.SelectboxColumn(options=STATUSES),
                            "url": st.column_config.LinkColumn()})
         if st.button("Save tracker changes"):
             for _, r in edited.iterrows():
-                if r["id"] in ss.jobs and r["status"] in STATUSES:
-                    ss.jobs[r["id"]]["status"] = r["status"]
-                    ss.jobs[r["id"]]["notes"] = str(r["notes"] or "")
+                j = ss.jobs.get(r["id"])
+                if j and r["status"] in STATUSES:
+                    if r["status"] != j["status"]:
+                        logic.set_status(j, r["status"])
+                    j["notes"] = str(r["notes"] or "")
             st.success("Saved.")
         export = pd.DataFrame(list(ss.jobs.values())).drop(columns=["description", "cover_letter", "highlights"])
         st.download_button("⬇️ Export to CSV", export.to_csv(index=False), file_name="applications.csv")
+
+# ---------------------------------------------------------------- REPORT
+with t_report:
+    tz = logic.safe_tz(ss.tz)
+    today = logic.local_date(logic.now_iso(), tz)
+    c0, c1 = st.columns(2)
+    day = c0.date_input("Day", value=today, max_value=today)
+    goal = int(c1.number_input("Your daily goal (applications)", 0, 50, int(ss.profile.get("daily_goal", 5))))
+    ss.profile["daily_goal"] = goal
+    if not ss.jobs:
+        st.info("Nothing to report yet. Find some jobs first.")
+    else:
+        rep = logic.build_report(ss.jobs, day, tz)
+        m = st.columns(5)
+        m[0].metric("Jobs found", len(rep["found"]))
+        m[1].metric("Jobs scored", len(rep["scored"]))
+        m[2].metric("Letters written", len(rep["letters"]))
+        m[3].metric("Applied", len(rep["applied"]))
+        m[4].metric("Interviews / rejections", len(rep["replies"]))
+        if goal > 0:
+            st.progress(min(len(rep["applied"]) / goal, 1.0),
+                        text=f"{len(rep['applied'])} of {goal} applications on {day.isoformat()}")
+
+        def show(title, items):
+            st.markdown(f"**{title}**")
+            if not items:
+                st.caption("None")
+            for text, url in items:
+                st.markdown(f"- [{text}]({url})" if logic.valid_url(url) else f"- {text}")
+
+        def label(j, extra=""):
+            sc = "" if j["score"] is None else f" · score {j['score']}"
+            return f"{j['title']} at {j['company']}{sc}{extra}", j["url"]
+
+        show("Applied", [label(j) for j in rep["applied"]])
+        show("Interviews and rejections", [label(j, f" · {j['status']}") for j in rep["replies"]])
+        show("Best matches still waiting for you", [label(j) for j in rep["pending"]])
+        show("Time to follow up (applied 7+ days ago)", [label(j, f" · {n} days ago") for j, n in rep["follow"]])
+        st.download_button("⬇️ Download this report", rep["markdown"], file_name=f"report-{day.isoformat()}.md")
+        st.caption(f"Times shown in your time zone ({ss.tz}). Jobs saved before this feature existed have no "
+                   "date, so they don't appear in daily counts. The report builds when you open this tab. "
+                   "The website can't send it to you by itself.")
 
 # ---------------------------------------------------------------- ASK
 with t_ask:
@@ -355,3 +455,22 @@ with t_ask:
             st.text_area("Draft (check it before using)", ans, height=200)
         except LLMError as e:
             st.error(friendly(e))
+
+# ---------------------------------------------------------------- save to this device (keep at the very end)
+if ss.device_loaded:
+    if ss.remember:
+        _items = {}
+        if ss.connected:
+            _items.update(aa_provider=ss.settings["provider"], aa_key=ss.settings["api_key"],
+                          aa_model=ss.settings["model"])
+        if ss.cv_text or ss.jobs or ss.profile_saved:
+            _items["aa_state"] = logic.export_state(ss.profile, ss.cv_text, ss.jobs, compact=True)
+        if _items:
+            _h = hashlib.sha1(json.dumps(_items, sort_keys=True).encode()).hexdigest()[:16]
+            if _h != ss.saved_hash:
+                _ack = store.local_store("set", _h, items=_items)
+                if _ack and _ack.get("id") == _h and _ack.get("ok"):
+                    ss.saved_hash = _h
+    else:
+        ss.saved_hash = ""
+        store.local_store("clear", "forget", keys=DEVICE_KEYS)

@@ -30,6 +30,7 @@ ss.setdefault("profile_saved", False)
 ss.setdefault("jobs", {})
 ss.setdefault("delay", 3)
 ss.setdefault("tz", "UTC")
+ss.setdefault("funnel", None)
 ss.setdefault("extra_keys", {"adzuna_id": "", "adzuna_key": "", "rapidapi_key": ""})
 
 
@@ -91,6 +92,7 @@ def run_search(progress, note):
     extra, extra_err = jobs.fetch_extra(p, ss.settings, ss.extra_keys)
     pool += extra
     errors += extra_err
+    ss.funnel = jobs.funnel([j for j in pool if j["url"]], p)
     added, seen = 0, set()
     for j in pool:
         if j["id"] in seen or not j["url"] or j["id"] in ss.jobs:
@@ -317,8 +319,20 @@ with t_find:
         note.success(f"Done. {added} new jobs found, {scored} scored. Open the Review tab.")
         for er in errs:
             st.warning(er)
-        if added == 0 and scored == 0 and not errs:
-            st.info("No new matches. Try broader roles or more places in Setup.")
+        fn = ss.get("funnel")
+        if fn:
+            src = ", ".join(f"{k}: {v}" for k, v in fn["by_source"].items()) or "none"
+            st.info(f"**What the agent saw:** {fn['total']} listings fetched ({src}). "
+                    f"{fn['passed']} matched all your filters.")
+            if fn["total"] == 0:
+                st.warning("No source returned anything. Check your internet or the warnings above, and that your "
+                           "sources are selected in Setup (and Adzuna keys are filled).")
+            elif fn["passed"] == 0 or added == 0:
+                if fn["passed"] and not added:
+                    st.write("The matching jobs were already in your list, so they are not new. Open the Review tab.")
+                for name, n in sorted(fn["without"].items(), key=lambda x: -x[1]):
+                    st.write(f"- Without the **{name}** filter you would get **{n}** jobs.")
+                st.caption("Fix it in Setup: add more places, set Looking for to 'any', or use broader roles.")
     st.markdown("---")
     st.markdown("**Found a job somewhere else** (LinkedIn, Internshala, a company page)? Add it by hand:")
     with st.form("manual", clear_on_submit=True):

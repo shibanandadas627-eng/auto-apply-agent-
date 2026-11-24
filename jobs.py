@@ -136,7 +136,7 @@ def fetch_google_web(settings, what, where=""):
     """Ask Gemini to search Google for open listings on the big job sites and give back the links."""
     if settings.get("provider") != "gemini" or not settings.get("api_key") or not settings.get("model"):
         raise RuntimeError("needs a connected Gemini key")
-    from llm import GEMINI_BASE, _post
+    from llm import GEMINI_BASE, LLMError, _post, gemini_candidates
     place = f" in {where}" if where else ""
     prompt = (f"Use Google Search to find currently open job listings for: {what}{place}. "
               "Look on linkedin.com/jobs, internshala.com, naukri.com, indeed.com, glassdoor.com, "
@@ -145,8 +145,23 @@ def fetch_google_web(settings, what, where=""):
               "Only include listings and URLs that appeared in the search results. "
               "No other text, no numbering, no markdown.")
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "tools": [{"google_search": {}}]}
-    data = _post(f"{GEMINI_BASE}/models/{settings['model']}:generateContent", retries=2,
-                 headers={"x-goog-api-key": settings["api_key"]}, json=body)
+    # Free keys have very small Google Search allowances that differ per model, so try a few models.
+    models = [settings["model"]]
+    try:
+        others = [m for m in gemini_candidates(settings["api_key"]) if m != settings["model"]]
+        models += sorted(others, key=lambda m: "lite" in m)[:3]      # full Flash models first
+    except Exception:
+        pass
+    data, last = None, None
+    for m in models:
+        try:
+            data = _post(f"{GEMINI_BASE}/models/{m}:generateContent", retries=1,
+                         headers={"x-goog-api-key": settings["api_key"]}, json=body)
+            break
+        except LLMError as e:
+            last = e
+    if data is None:
+        raise last or RuntimeError("no Gemini model answered")
     try:
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
     except (KeyError, IndexError):
@@ -193,6 +208,10 @@ def fetch_extra(p, settings=None, keys=None):
             try:
                 found += fetch_google_web(settings, what, where)
             except Exception as e:
+                if "429" in str(e):
+                    errors.append("google_web: Gemini's free Google Search limit is used up for now. The other "
+                                  "sources still ran. Try again in a few minutes or tomorrow.")
+                    break                      # more queries would hit the same limit
                 errors.append(f"google_web '{what}': {str(e)[:120]}")
     return found, errors
 

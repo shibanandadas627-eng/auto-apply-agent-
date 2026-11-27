@@ -1,0 +1,48 @@
+name: Daily job search
+
+on:
+  schedule:
+    - cron: "30 2 * * *"     # every day at 08:00 India time (02:30 UTC); change as you like
+  workflow_dispatch:          # lets you press "Run workflow" to test it
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-agent.txt
+      - run: pip install -r requirements-agent.txt
+      - name: Remember which jobs were already seen
+        uses: actions/cache@v4
+        with:
+          path: |
+            seen.json
+            sent.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+      - name: Find, score and email
+        env:
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          AI_KEY: ${{ secrets.AI_KEY }}
+          AA_PROFILE: ${{ secrets.AA_PROFILE }}
+          AA_CV: ${{ secrets.AA_CV }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          ADZUNA_ID: ${{ secrets.ADZUNA_ID }}
+          ADZUNA_KEY: ${{ secrets.ADZUNA_KEY }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          AUTO_APPLY: ${{ secrets.AUTO_APPLY }}
+          AUTO_MIN_SCORE: ${{ secrets.AUTO_MIN_SCORE }}
+          AUTO_MAX_PER_DAY: ${{ secrets.AUTO_MAX_PER_DAY }}
+          AA_CV_LINK: ${{ secrets.AA_CV_LINK }}
+          AA_CV_B64: ${{ secrets.AA_CV_B64 }}
+        run: python auto_run.py

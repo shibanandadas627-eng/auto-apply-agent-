@@ -12,12 +12,14 @@ from pathlib import Path
 import jobs
 import llm
 import logic
+import apply_email
 import matcher
 import tailor
 from llm import LLMError
 from utils import DEFAULT_PROFILE
 
 SEEN = Path("seen.json")
+SENT = Path("sent.json")
 
 
 def env(name, default=""):
@@ -85,8 +87,56 @@ def main():
             break
         time.sleep(3)
 
+    # ---- apply by email, for strong matches that clearly say to send your CV to an address ----
+    auto_on = env("AUTO_APPLY").lower() == "yes"
+    auto_min, auto_max = int(env("AUTO_MIN_SCORE", "80")), int(env("AUTO_MAX_PER_DAY", "5"))
+    sent = set(json.loads(SENT.read_text())) if SENT.exists() else set()
+    applied, would, held = [], [], []
+    if env("AUTO_APPLY").lower() in ("yes", "test"):
+        name = profile.get("name", "").strip()
+        if not name:
+            sys.exit("Set your full name in the app Setup, then copy AA_PROFILE again: it signs the emails.")
+        cv_bytes = apply_email.decode_cv(env("AA_CV_B64")) or apply_email.cv_pdf(cv, name)
+        for j in good:
+            if len(applied) + len(would) >= auto_max:
+                break
+            to = apply_email.find_email(j["title"] + "\n" + j["description"])
+            if j["score"] < auto_min or not to or to in sent:
+                continue
+            if not j.get("cover_letter"):
+                try:
+                    j["cover_letter"] = tailor.prepare(j, profile, cv, settings)["cover_letter"]
+                except (LLMError, ValueError) as e:
+                    errors.append(logic.friendly(e))
+                    break
+                time.sleep(3)
+            if "[FILL IN" in j["cover_letter"].upper() or len(j["cover_letter"]) < 200:
+                held.append((j, to, "the letter has a blank or is too short"))
+                continue
+            if not auto_on:
+                would.append((j, to))
+                continue
+            try:
+                apply_email.send(apply_email.build(j, name, j["cover_letter"], env("SMTP_USER"), to, cv_bytes,
+                                                   env("AA_CV_LINK")), env("SMTP_USER"), env("SMTP_PASS"),
+                                 env("SMTP_HOST", "smtp.gmail.com"))
+                sent.add(to)
+                applied.append((j, to))
+            except Exception as e:
+                errors.append(f"could not email {to}: {str(e)[:100]}")
+            time.sleep(5)
+
     lines = [f"Searched {len(found)} matching listings, {len(fresh)} new, scored {len(scored)}, "
              f"{len(good)} at or above your minimum score of {profile['min_score']}.", ""]
+    if applied:
+        lines += ["APPLIED BY EMAIL TODAY (your letter and CV were sent from your mailbox):"]
+        lines += [f"- {j['score']}/100 {j['title']} at {j['company']} -> {to}" for j, to in applied] + [""]
+    if would:
+        lines += ["WOULD HAVE APPLIED, because AUTO_APPLY is set to test (nothing was sent):"]
+        lines += [f"- {j['score']}/100 {j['title']} at {j['company']} -> {to}" for j, to in would] + [""]
+    if held:
+        lines += ["NOT SENT (check these by hand):"]
+        lines += [f"- {j['title']} at {j['company']} -> {to}: {why}" for j, to, why in held] + [""]
     for j in good:
         lines += [f"{j['score']}/100  {j['title']} at {j['company']} ({j['location']})",
                   f"Apply: {j['url']}", f"Why: {j['reason']}", ""]
@@ -97,9 +147,10 @@ def main():
         lines.append("No strong new matches today.")
     if errors:
         lines += ["", "Notes:"] + [f"- {e}" for e in errors[:10]]
-    send_email(f"AutoApply: {len(good)} new matches", "\n".join(lines))
+    send_email(f"AutoApply: {len(good)} new matches, {len(applied)} applied by email", "\n".join(lines))
     SEEN.write_text(json.dumps(sorted(seen)[-5000:]))
-    print(f"Done: {len(found)} found, {len(scored)} scored, {len(good)} emailed, {len(errors)} notes.")
+    SENT.write_text(json.dumps(sorted(sent)[-5000:]))
+    print(f"Done: {len(found)} found, {len(scored)} scored, {len(good)} matched, {len(applied)} applied, {len(errors)} notes.")
 
 
 if __name__ == "__main__":

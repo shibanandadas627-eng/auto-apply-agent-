@@ -508,12 +508,19 @@ with t_auto:
                 "- `AA_PROFILE`: the text in the first box below\n- `AA_CV`: the text in the second box below\n"
                 "- `SMTP_USER`, `SMTP_PASS`: your Gmail address and a Gmail **app password** "
                 "(Google Account → Security → App passwords)\n- `EMAIL_TO`: where to send the digest\n"
-                "- Optional: `ADZUNA_ID`, `ADZUNA_KEY`, `RAPIDAPI_KEY`")
+                "- Optional: `ADZUNA_ID`, `ADZUNA_KEY`, `RAPIDAPI_KEY`\n"
+                "- **To apply by itself:** `AUTO_APPLY` = `test` first (the email lists who it *would* apply to, nothing is sent), then change "
+                "it to `yes`, `AUTO_MIN_SCORE` (default 80), `AUTO_MAX_PER_DAY` (default 5), "
+                "optional `AA_CV_LINK` (a link to your CV)")
     st.caption("Your repository is public, so use secrets for all of this. Never put these values in a file.")
     st.markdown("**AA_PROFILE** (copy with the icon in the corner)")
     st.code(json.dumps(ss.profile), language="json", wrap_lines=True)
     st.markdown("**AA_CV**")
     st.code(ss.cv_text[:30000] or "(upload your CV in Setup first)", language=None, wrap_lines=True)
+    st.info("**Applying by itself:** the agent emails your cover letter and CV, from your own Gmail, to jobs that "
+            "clearly say to send your CV to an address, and only if the score is high enough. It cannot fill in "
+            "web forms or use LinkedIn, Naukri or Internshala logins. Each address is emailed once, and the "
+            "daily email lists everything that was sent.")
     st.warning("Don't share these boxes with anyone. They contain your details.")
 
 # ---------------------------------------------------------------- save to this device (keep at the very end)
